@@ -108,6 +108,27 @@ Mientras el PIC 8259A no recibe el EOI, el bit de IRQ1 sigue activo en su regist
 
 El polling de `TECL.ASM` es inaceptable en cualquier programa que deba hacer trabajo útil mientras espera: un juego que anima la pantalla, un programa que recibe datos por el puerto serie o un esquema multitarea cooperativo. El bucle de 12 bytes repite `IN`, `TEST` y `JZ` sin descanso y ocupa el 100 % de la CPU sin avanzar nada. Con `ISR_KB.ASM` el programa principal queda libre y el hardware lo interrumpe solo cuando hay una tecla. En latencia el ISR también gana: el 8042 activa IRQ1, el PIC la presenta y la CPU la atiende al terminar la instrucción en curso; el polling en cambio solo detecta el dato cuando la ejecución vuelve a pasar por `IN AL, 64h`, y si el programa estuviera haciendo otra cosa entre sondeos la demora sería todo ese trabajo. En `TECL.ASM` el bucle es tan corto que la diferencia es mínima, pero el programa no hace nada más. Para un dispositivo lento y esporádico como el teclado, que puede pasar minutos sin eventos, el polling consume millones de ciclos que no producen nada, impide que la CPU haga otra tarea y además obliga a deshabilitar interrupciones para que el BIOS no le gane el dato, como mostró `TECL.ASM`. Ambos métodos funcionan en el laboratorio, pero solo la interrupción escala a un programa real. La regla es usar polling para esperas cortas y garantizadas, y una interrupción para eventos esporádicos.
 
+## Capturas
+
+| Archivo | Contenido |
+|---------|-----------|
+| `capturas/p1-cp0-compilacion.png` | `COMPILA.BAT` ensamblando los ocho programas sin errores |
+| `capturas/p1-cp0-tamanos-com.png` | Listado de los ocho `.COM` con sus tamaños |
+| `capturas/p1-cp1-tecl-ejecucion.png` | Checkpoint 1: scancode 1E leído por polling |
+| `capturas/p1-cp1-tecl-debug.png` | Checkpoint 1: bucle de polling desensamblado con `u 100 12f` |
+| `capturas/p1-cp2-cp4-poll-lpt-multi-ejecucion.png` | Checkpoints 2 a 4: timeout, envío a LPT1 y polling combinado |
+| `capturas/p1-cp2-poll-t-debug.png` | Checkpoint 2: `LOOP` con CX = 5 desensamblado |
+| `capturas/p1-cp3-lptsend-debug.png` | Checkpoint 3: protocolo Centronics por DX |
+| `capturas/p1-cp4-multi-st-debug.png` | Checkpoint 4: normalización y OR de las banderas |
+| `capturas/p2-cp1-isr-kb-ejecucion.png` | Checkpoint 1: cinco avisos del ISR propio y restauración |
+| `capturas/p2-cp1-isr-kb-debug.png` | Checkpoint 1: instalación del vector con AH = 35h y 25h |
+| `capturas/p2-cp2-mask-kb-ejecucion.png` | Checkpoint 2: IMR = FA enmascarado y F8 restaurado |
+| `capturas/p2-cp2-mask-kb-debug.png` | Checkpoint 2: lectura y escritura del puerto 21h |
+| `capturas/p2-cp3-isr-chain-ejecucion.png` | Checkpoint 3: eco del BIOS y conteo propio de 5 teclas |
+| `capturas/p2-cp3-isr-chain-debug.png` | Checkpoint 3: instalación del ISR encadenado |
+| `capturas/p2-cp4-isr-time-ejecucion.png` | Checkpoint 4: intervalos de 19, 20, 37, 56 y 1 ticks |
+| `capturas/p2-cp4-isr-time-debug.png` | Checkpoint 4: lectura inicial de 0040h:006Ch |
+
 ## Referencias
 
 - Brown, R. (s.f.). *Ralf Brown's Interrupt List: INT 21h, INT 16h, INT 1Ah*. http://www.ctyme.com/rbrown.htm
