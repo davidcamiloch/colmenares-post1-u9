@@ -60,6 +60,54 @@ El bucle sin límite de `TECL.ASM` solo es aceptable cuando el dispositivo tiene
 
 En DOSBox el bit BUSY# de 0379h vale 1 de forma permanente porque no hay impresora; por eso BH = 1 en cada lectura y `OR AL, BH` nunca da cero. El bucle `.poll` de `MULTI_ST.ASM` termina en la primera iteración sin importar el estado del teclado, y la ejecución lo confirma: el programa imprime `LPT1 listo` de inmediato y nunca espera una tecla. La consecuencia práctica es que la espera combinada deja de esperar: un dispositivo siempre listo anula al otro, y el programa trataría como evento algo que no ocurrió. Por la misma razón el OR solo sirve para salir del bucle; después hay que examinar BL y BH por separado, porque el resultado de la OR dice que alguno está listo pero no cuál, y leer el puerto 60h cuando quien respondió fue LPT1 entregaría un scancode viejo o basura. Si las dos banderas se combinaran con AND (`AND AL, BH` y `JZ .poll`), el programa esperaría a que ambos dispositivos estuvieran listos a la vez. Esa es la condición correcta para enviar a la impresora la tecla que el usuario acaba de pulsar: hace falta que haya un dato en el 8042 y que LPT1 pueda recibirlo. La regla es usar OR para esperar el primero de varios eventos, AND para exigir que coincidan y examinar siempre cada bandera antes de actuar.
 
+## Parte 2: Interrupciones de hardware
+
+| Programa | Recurso | Técnica | Salida verificada en DOSBox |
+|----------|---------|---------|-----------------------------|
+| `ISR_KB.ASM` | INT 09h, puerto 20h | ISR propio con EOI y restauración del vector | `Tecla detectada por ISR propio` ×5 y `ISR restaurado` |
+| `MASK_KB.ASM` | IMR en 21h | Bit 1 del IMR en 1 durante 55 ticks | `IMR = FA` enmascarado y `IMR = F8` restaurado |
+| `ISR_CHN.ASM` | INT 09h | ISR encadenado con `PUSHF` y `CALL FAR` | Eco `holas` y `Teclas contadas por el ISR propio: 5` |
+| `ISR_TIME.ASM` | INT 09h, 0040h:006Ch | Intervalo en ticks entre make codes | 19, 20, 37, 56 y 1 ticks |
+
+### Checkpoint 1: ISR propio para IRQ1
+
+`ISR_KB.ASM` obtiene el vector actual con INT 21h AH = 35h (ES:BX), lo guarda en `old_isr` e instala `mi_isr` con AH = 25h. El ISR guarda AX, DX y DS, carga DS con CS, lee el scancode en 60h (esa lectura libera el 8042), imprime el aviso si es un make code, envía EOI (20h al puerto 20h), restaura los registros y ejecuta `IRET`. El programa principal solo espera a que `contador` llegue a 5 y luego reinstala el vector original. El ISR ocupa 32 bytes (0136h a 0155h).
+
+### Checkpoint 2: enmascaramiento con el IMR
+
+`MASK_KB.ASM` lee el IMR del puerto 21h (F8h: IRQ0, IRQ1 e IRQ2 habilitadas), pone en 1 el bit 1 con `OR AL, 02h` y lo escribe. El IMR queda en FAh y el PIC deja de entregar IRQ1. Durante 55 ticks (3 s × 18,2) se pulsaron x, y y z sin que aparecieran; al restaurar F8h el 8042 entregó las teclas retenidas y se vieron en el prompt (`D:\>xyz`). Eso confirma que el IMR bloquea la entrega al CPU pero no la captura en el controlador.
+
+### Checkpoint 3: encadenamiento de ISR
+
+`mi_isr_chain` cuenta el make code y después llama al manejador original con `PUSHF` y `CALL FAR [cs:old_isr]`. `PUSHF` deja en la pila FLAGS y `CALL FAR` deja CS:IP, que es el mismo marco que crea `INT`; por eso el `IRET` del BIOS regresa a `mi_isr_chain`, y el `IRET` propio regresa al programa interrumpido. El ISR encadenado no envía EOI, porque ya lo hace el BIOS. Como el BIOS sigue guardando las teclas, INT 21h AH = 01h las lee con eco y el contador propio llega a 5 en paralelo.
+
+### Checkpoint 4: medición de intervalo con el contador de ticks
+
+`ISR_TIME.ASM` lee la palabra baja de 0040h:006Ch dentro del ISR, envía EOI y resta el valor guardado en `ticks_prev`. Las cinco teclas pulsadas con pausas de aproximadamente 1, 1, 2 y 3 s y una inmediata dieron 19, 20, 37, 56 y 1 ticks. La conversión de los primeros valores queda así.
+
+```
+19 / 18,2 = 1,04 s     37 / 18,2 = 2,03 s     56 / 18,2 = 3,08 s
+```
+
+La resta en 16 bits sigue siendo correcta cuando la palabra baja pasa de FFFFh a 0000h, porque el resultado se toma módulo 65 536.
+
+### Desviaciones respecto a la guía
+
+- `ISR_CHAIN.ASM` se llama `ISR_CHN.ASM`. DOS solo admite nombres de 8 caracteres; `ISR_CHAIN` se truncaría a `ISR_CH~1` al montar la carpeta.
+- Cada tecla genera dos IRQ1: una al presionar (make) y otra al soltar (break, bit 7 = 1). La guía contaba ambas y cinco avisos correspondían a dos teclas y media. `ISR_KB`, `ISR_CHN` e `ISR_TIME` solo cuentan los make codes.
+- `LDS DX, [old_isr]` cambia DS al segmento del BIOS. Si DS no se guarda y se restaura, el mensaje final se lee de ese segmento y se imprime basura. Los tres programas usan `PUSH DS` / `LDS` / `INT 21h` / `POP DS`.
+- `MASK_KB.ASM` tenía los mensajes antes del código. En un `.COM` la ejecución empieza en 0100h y la CPU habría ejecutado el texto como instrucciones; los datos se movieron al final. La espera compara con `JB` (sin signo) en lugar de `JL`, porque los ticks son un contador sin signo.
+- `ISR_CHN.ASM` lee las teclas con INT 21h AH = 01h para demostrar que el BIOS sigue recibiéndolas a través de la cadena.
+- Todos los programas terminan con `MOV AX, 4C00h` para devolver código de salida 0.
+
+### Decisión técnica 3: en qué punto del ISR debe ir el EOI
+
+Mientras el PIC 8259A no recibe el EOI, el bit de IRQ1 sigue activo en su registro ISR (In-Service Register) y el PIC no despacha ninguna IRQ de igual o menor prioridad; solo IRQ0 (el temporizador) tiene más prioridad que IRQ1. Si `ISR_KB.ASM` envía el EOI después de imprimir por INT 21h, toda la impresión transcurre con el teclado, IRQ3 a IRQ7 y las IRQ del PIC esclavo retenidas; un puerto serie o una tarjeta de sonido que pidan servicio en ese lapso esperan, y si llegan dos peticiones de la misma línea antes del EOI una se pierde, porque el IRR solo guarda un bit por línea. Como el ISR no ejecuta `STI`, IF sigue en 0 hasta el `IRET`; por eso un EOI temprano no permite que IRQ1 reentre en el ISR ni que otra interrupción corte la impresión. Lo que sí permite es que el PIC registre y priorice las IRQ pendientes y las presente apenas el `IRET` restaure IF = 1, en lugar de esperar a un EOI que todavía no llegó. Permitir que el PIC despache otras IRQ es seguro; permitir que la misma IRQ1 reentre exigiría `STI` y un ISR reentrante, que este laboratorio no tiene. `ISR_TIME.ASM` envía el EOI justo después de leer el puerto 60h y el contador de ticks porque ahí termina el trabajo que depende del hardware; la impresión ya no lo necesita. Esa es la práctica recomendada en general. La regla es enviar el EOI apenas termina el diálogo con el dispositivo y dejar para después el trabajo lento.
+
+### Decisión técnica 4: polling o interrupción para el mismo dispositivo
+
+El polling de `TECL.ASM` es inaceptable en cualquier programa que deba hacer trabajo útil mientras espera: un juego que anima la pantalla, un programa que recibe datos por el puerto serie o un esquema multitarea cooperativo. El bucle de 12 bytes repite `IN`, `TEST` y `JZ` sin descanso y ocupa el 100 % de la CPU sin avanzar nada. Con `ISR_KB.ASM` el programa principal queda libre y el hardware lo interrumpe solo cuando hay una tecla. En latencia el ISR también gana: el 8042 activa IRQ1, el PIC la presenta y la CPU la atiende al terminar la instrucción en curso; el polling en cambio solo detecta el dato cuando la ejecución vuelve a pasar por `IN AL, 64h`, y si el programa estuviera haciendo otra cosa entre sondeos la demora sería todo ese trabajo. En `TECL.ASM` el bucle es tan corto que la diferencia es mínima, pero el programa no hace nada más. Para un dispositivo lento y esporádico como el teclado, que puede pasar minutos sin eventos, el polling consume millones de ciclos que no producen nada, impide que la CPU haga otra tarea y además obliga a deshabilitar interrupciones para que el BIOS no le gane el dato, como mostró `TECL.ASM`. Ambos métodos funcionan en el laboratorio, pero solo la interrupción escala a un programa real. La regla es usar polling para esperas cortas y garantizadas, y una interrupción para eventos esporádicos.
+
 ## Referencias
 
 - Brown, R. (s.f.). *Ralf Brown's Interrupt List: INT 21h, INT 16h, INT 1Ah*. http://www.ctyme.com/rbrown.htm
